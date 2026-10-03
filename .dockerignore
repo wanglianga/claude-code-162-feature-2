@@ -1,0 +1,6 @@
+.git
+.gitignore
+*.md
+.tmp
+tmp/
+scripts/*.log

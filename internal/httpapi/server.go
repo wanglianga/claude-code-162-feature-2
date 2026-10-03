@@ -111,8 +111,10 @@ func requireRole(role string, next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
+	// 离线 Swagger UI: /docs, /swagger/*
+	s.registerSwagger(r)
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, 200, map[string]string{"status": "ok"})
+		writeJSON(w, 200, map[string]string{"status": "ok", "docs": "/docs"})
 	})
 	r.Route("/api/v1", func(r chi.Router) {
 		r.With(s.auth).Get("/me", s.handleMe)
@@ -147,11 +149,22 @@ func (s *Server) Router() http.Handler {
 		r.With(s.auth).Post("/collector/orders/{id}/settle/retry", requireRole(domain.RoleCollector, s.handleSettleRetry))
 		r.With(s.auth).Post("/collector/orders/{id}/deliver", requireRole(domain.RoleCollector, s.handleDeliver))
 		r.With(s.auth).Get("/collector/earnings", requireRole(domain.RoleCollector, s.handleEarnings))
+		r.With(s.auth).Post("/collector/orders/{id}/contamination", requireRole(domain.RoleCollector, s.handleMarkContaminant))
+		r.With(s.auth).Post("/collector/contamination/{cid}/reject", requireRole(domain.RoleCollector, s.handleRejectContaminant))
+		r.With(s.auth).Get("/collector/training", requireRole(domain.RoleCollector, s.handleTrainingList))
+		r.With(s.auth).Post("/collector/training/{tid}/complete", requireRole(domain.RoleCollector, s.handleTrainingComplete))
+
+		// 居民: 不可回收物拒收依据/投放指引
+		r.With(s.auth).Post("/contamination/{cid}/insist", requireRole(domain.RoleResident, s.handleInsistContaminant))
+		r.With(s.auth).Get("/contamination/{cid}/guidance", requireRole(domain.RoleResident, s.handleContamGuidance))
+		r.With(s.auth).Get("/rejection-catalog", s.handleRejectionCatalog)
+		r.With(s.auth).Get("/rejection-guide", s.handleRejectionGuide)
 
 		// 站点
 		r.With(s.auth).Post("/station/inbound/{orderId}/reweigh", requireRole(domain.RoleStation, s.handleReweigh))
 		r.With(s.auth).Get("/station/inbound", requireRole(domain.RoleStation, s.handleStationInbound))
 		r.With(s.auth).Get("/station/quality", requireRole(domain.RoleStation, s.handleStationQuality))
+		r.With(s.auth).Get("/station/env-risks", requireRole(domain.RoleStation, s.handleStationEnvRisks))
 
 		// 街道/管理
 		r.With(s.auth).Get("/street/stats", requireRole(domain.RoleStreet, s.handleStreetStats))

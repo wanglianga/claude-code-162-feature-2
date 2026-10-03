@@ -50,6 +50,17 @@ wait_balance(){
   curl -s "$BASE/points/balance" -H "$R1" | jq -r '.balance'
   return 1
 }
+# wait_notif <kind> <token-header> [timeout] -> 该类通知条数
+wait_notif(){
+  local kind="$1" hdr="$2" tmo="${3:-10}" i n
+  for i in $(seq 1 "$tmo"); do
+    n=$(curl -s "$BASE/notifications" -H "$hdr" | jq -r "[.notifications[] | select(.kind==\"$kind\")] | length")
+    [ "$n" -ge 1 ] && { echo "$n"; return 0; }
+    sleep 1
+  done
+  echo "${n:-0}"
+  return 1
+}
 
 echo "=== 0. 重建环境 ==="
 psql "$PG_DSN" -q -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>/dev/null || { echo "pg reset failed"; exit 1; }
@@ -330,6 +341,157 @@ check "新价=1.5元" "$P" "1.5"
 # 老订单价格快照不受影响: 订单1的纸单价仍是1.2
 OLDP=$(curl -s "$BASE/orders/$OID" -H "$R1" | jq -r '.items[] | select(.category=="paper") | .est_price_yuan')
 check "老订单价格快照=1.2元" "$OLDP" "1.2"
+
+echo "=== 22. 不可回收物现场拒收(油漆桶混在金属中) ==="
+# 22.1 拒收目录/依据可查
+CATN=$(curl -s "$BASE/rejection-catalog" -H "$R1" | jq -r '.catalog | length')
+[ "$CATN" -ge 2 ] && ok "拒收目录 $CATN 项" || bad "拒收目录不足: $CATN"
+GUIDE=$(curl -s "$BASE/rejection-guide?code=paint_bucket&lat=31.2304&lng=121.4737" -H "$R1")
+echo "$GUIDE" | grep -q "HW49" && ok "拒收依据含危废条款" || bad "拒收依据缺失"
+GN=$(jqget '.nearby_points | length' "$GUIDE")
+[ "$GN" -ge 1 ] && ok "附近处理点 $GN 个" || bad "附近处理点缺失"
+
+# 22.2 下一单: 居民预约金属, 全流程到核验
+RESP=$(curl -s -X POST "$BASE/orders" -H "$R1" -H "$CT" -d "{
+  \"items\":[{\"category\":\"metal\",\"est_weight_kg\":10}],
+  \"time_window_start\":\"$WS\",\"time_window_end\":\"$WE\",\"idempotency_key\":\"e2e-order-7\"}")
+OID7=$(jqget '.order.id' "$RESP"); VCODE7=$(jqget '.order.verify_code' "$RESP")
+wait_status "$OID7" "$C1" ASSIGNED >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/accept" -H "$C1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/start" -H "$C1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/arrive" -H "$C1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/verify-resident" -H "$C1" -H "$CT" \
+  -d "{\"method\":\"SCAN_CODE\",\"verify_code\":\"$VCODE7\"}" >/dev/null
+
+# 22.3 回收员现场标记油漆桶并说明风险
+MK=$(curl -s -X POST "$BASE/collector/orders/$OID7/contamination" -H "$C1" -H "$CT" -d '{
+  "item_category":"metal","item_name":"油漆桶","code":"paint_bucket",
+  "weight_kg":0.6,"risk_note":"桶内有残漆, 气味刺鼻"}')
+CID=$(jqget '.contamination.id' "$MK")
+check "现场标记状态=MARKED" "$(jqget '.contamination.status' "$MK")" "MARKED"
+check "现场标记环节=ONSITE" "$(jqget '.contamination.detected_stage' "$MK")" "ONSITE"
+check "油漆桶风险=HIGH" "$(jqget '.contamination.risk_level' "$MK")" "HIGH"
+echo "$MK" | grep -q "HW49" && ok "标记记录含拒收依据" || bad "标记记录拒收依据缺失"
+NOTIF=$(wait_notif CONTAMINATION_MARKED "$R1")
+[ "$NOTIF" -ge 1 ] && ok "风险说明已通知居民" || bad "风险通知缺失"
+# 非归属回收员不能标记他人订单
+ERR=$(curl -s -X POST "$BASE/collector/orders/$OID7/contamination" -H "Authorization: Bearer token-collector2" -H "$CT" \
+  -d '{"item_name":"x"}' | jq -r '.error // "none"')
+[ "$ERR" != "none" ] && ok "他单回收员标记被拒" || bad "他单标记未拦截"
+
+# 22.4 居民坚持要求带走 -> 服务给出拒收依据
+INS=$(curl -s -X POST "$BASE/contamination/$CID/insist" -H "$R1" -H "$CT")
+check "坚持后服务拒收" "$(jqget '.decision' "$INS")" "REJECTED_PER_REGULATION"
+echo "$INS" | grep -q "HW49" && ok "居民端拿到拒收依据" || bad "居民端拒收依据缺失"
+
+# 22.5 居民端投放建议 + 附近处理点
+DG=$(curl -s "$BASE/contamination/$CID/guidance" -H "$R1")
+check "投放建议存在" "$(echo "$DG" | jq -r '.advice | length > 0')" "true"
+PN=$(jqget '.nearby_points | length' "$DG")
+[ "$PN" -ge 1 ] && ok "附近处理点推荐 $PN 个" || bad "附近处理点推荐缺失"
+ACCEPT=$(echo "$DG" | jq -r '.nearby_points[0].accepts | index("hazardous_waste")')
+[ "$ACCEPT" != "null" ] && ok "推荐点接收有害垃圾" || bad "推荐点类型不匹配"
+
+# 22.6 回收员拒收闭环
+RJ=$(curl -s -X POST "$BASE/collector/contamination/$CID/reject" -H "$C1" -H "$CT" \
+  -d '{"note":"已告知居民送至有害垃圾暂存点"}')
+check "拒收闭环=REJECTED" "$(jqget '.contamination.status' "$RJ")" "REJECTED"
+NOTIF=$(wait_notif CONTAMINATION_REJECTED "$R1")
+[ "$NOTIF" -ge 1 ] && ok "拒收通知已送达居民" || bad "拒收通知缺失"
+# 重复拒收被拒
+ERR=$(curl -s -X POST "$BASE/collector/contamination/$CID/reject" -H "$C1" -H "$CT" -d '{}' | jq -r '.error // "none"')
+[ "$ERR" != "none" ] && ok "重复拒收被拦截" || bad "重复拒收未拦截"
+
+# 22.7 拒收不影响订单其余可回收物正常流转
+curl -s -X POST "$BASE/collector/orders/$OID7/weigh" -H "$C1" -H "$CT" \
+  -d '{"weights":[{"category":"metal","weight_kg":10}]}' >/dev/null
+curl -s -X POST "$BASE/orders/$OID7/confirm" -H "$R1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/settle" -H "$C1" -H "$CT" -d '{"type":"cash"}' >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/deliver" -H "$C1" >/dev/null
+curl -s -X POST "$BASE/station/inbound/$OID7/reweigh" -H "$S1" -H "$CT" \
+  -d '{"weights":[{"category":"metal","weight_kg":10}]}' >/dev/null
+ST1=$(curl -s "$BASE/orders/$OID7" -H "$R1" | jq -r '.order.status')
+check "拒收订单正常完结" "$ST1" "COMPLETED"
+TC=$(curl -s "$BASE/orders/$OID7/trace" -H "$R1" | jq -r '.contaminations | length')
+check "trace 含混入记录" "$TC" "1"
+
+echo "=== 23. 回收员误收 -> 站点入库异常扣款+环保风险+培训记录 ==="
+# 23.1 回收员未识别油漆桶, 正常完成称重结算送达
+RESP=$(curl -s -X POST "$BASE/orders" -H "$R1" -H "$CT" -d "{
+  \"items\":[{\"category\":\"metal\",\"est_weight_kg\":10}],
+  \"time_window_start\":\"$WS\",\"time_window_end\":\"$WE\",\"idempotency_key\":\"e2e-order-8\"}")
+OID8=$(jqget '.order.id' "$RESP"); VCODE8=$(jqget '.order.verify_code' "$RESP")
+wait_status "$OID8" "$C1" ASSIGNED >/dev/null
+for act in accept start arrive; do
+  curl -s -X POST "$BASE/collector/orders/$OID8/$act" -H "$C1" >/dev/null
+done
+curl -s -X POST "$BASE/collector/orders/$OID8/verify-resident" -H "$C1" -H "$CT" \
+  -d "{\"method\":\"SCAN_CODE\",\"verify_code\":\"$VCODE8\"}" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID8/weigh" -H "$C1" -H "$CT" \
+  -d '{"weights":[{"category":"metal","weight_kg":10}]}' >/dev/null
+curl -s -X POST "$BASE/orders/$OID8/confirm" -H "$R1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID8/settle" -H "$C1" -H "$CT" -d '{"type":"cash"}' >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID8/deliver" -H "$C1" >/dev/null
+EARN_BEFORE=$(curl -s "$BASE/collector/earnings" -H "$C1" | jq -r ".earnings[] | select(.order_id==$OID8) | .total_yuan")
+
+# 23.2 站点入库复称发现油漆桶, 标记处理成本 2 元(订单收益足以覆盖)
+RW=$(curl -s -X POST "$BASE/station/inbound/$OID8/reweigh" -H "$S1" -H "$CT" -d '{
+  "weights":[{"category":"metal","weight_kg":10}],
+  "contaminants":[{"item_category":"metal","item_name":"油漆桶","code":"paint_bucket",
+                   "weight_kg":0.8,"handling_cost_yuan":2,"risk_note":"残漆渗漏, 需危废暂存"}]}')
+check "误收单仍完结" "$(jqget '.order.status' "$RW")" "COMPLETED"
+check "风险记录数=1" "$(jqget '.env_risks | length' "$RW")" "1"
+check "误收状态" "$(jqget '.env_risks[0].status' "$RW")" "ERRONEOUS_ACCEPTED"
+check "误收环节=INBOUND" "$(jqget '.env_risks[0].detected_stage' "$RW")" "INBOUND"
+check "处理成本=2元" "$(jqget '.env_risks[0].handling_cost_yuan' "$RW")" "2"
+check "订单扣款=2元" "$(jqget '.env_risks[0].order_charged_yuan' "$RW")" "2"
+check "培训扣款=0元" "$(jqget '.env_risks[0].training_charged_yuan' "$RW")" "0"
+check "扣款去向=ORDER" "$(jqget '.env_risks[0].charged_to' "$RW")" "ORDER"
+MP=$(curl -s "$BASE/collector/earnings" -H "$C1" | jq -r ".earnings[] | select(.order_id==$OID8) | .misaccept_penalty_yuan")
+check "收益误收扣款=2元" "$MP" "2"
+EARN_AFTER=$(curl -s "$BASE/collector/earnings" -H "$C1" | jq -r ".earnings[] | select(.order_id==$OID8) | .total_yuan")
+EXPECT_AFTER=$(awk -v a="$EARN_BEFORE" 'BEGIN{printf "%.2f", a-2}')
+check "结算实发=收益-2元" "$EARN_AFTER" "$EXPECT_AFTER"
+
+# 23.3 站点环保风险记录台账
+ER=$(curl -s "$BASE/station/env-risks" -H "$S1")
+ERN=$(jqget '.env_risks | length' "$ER")
+[ "$ERN" -ge 1 ] && ok "站点环保风险台账 $ERN 条" || bad "环保风险台账缺失"
+
+# 23.4 高处理成本超收益: 不足部分挂培训记录
+RESP=$(curl -s -X POST "$BASE/orders" -H "$R1" -H "$CT" -d "{
+  \"items\":[{\"category\":\"metal\",\"est_weight_kg\":10}],
+  \"time_window_start\":\"$WS\",\"time_window_end\":\"$WE\",\"idempotency_key\":\"e2e-order-9\"}")
+OID9=$(jqget '.order.id' "$RESP"); VCODE9=$(jqget '.order.verify_code' "$RESP")
+wait_status "$OID9" "$C1" ASSIGNED >/dev/null
+for act in accept start arrive; do
+  curl -s -X POST "$BASE/collector/orders/$OID9/$act" -H "$C1" >/dev/null
+done
+curl -s -X POST "$BASE/collector/orders/$OID9/verify-resident" -H "$C1" -H "$CT" \
+  -d "{\"method\":\"SCAN_CODE\",\"verify_code\":\"$VCODE9\"}" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID9/weigh" -H "$C1" -H "$CT" \
+  -d '{"weights":[{"category":"metal","weight_kg":10}]}' >/dev/null
+curl -s -X POST "$BASE/orders/$OID9/confirm" -H "$R1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID9/settle" -H "$C1" -H "$CT" -d '{"type":"cash"}' >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID9/deliver" -H "$C1" >/dev/null
+E9=$(curl -s "$BASE/collector/earnings" -H "$C1" | jq -r ".earnings[] | select(.order_id==$OID9) | .total_yuan")
+RW=$(curl -s -X POST "$BASE/station/inbound/$OID9/reweigh" -H "$S1" -H "$CT" -d '{
+  "weights":[{"category":"metal","weight_kg":10}],
+  "contaminants":[{"item_category":"metal","item_name":"油漆桶","code":"paint_bucket",
+                   "weight_kg":1.2,"handling_cost_yuan":20}]}')
+check "高成本订单扣款=订单收益" "$(jqget '.env_risks[0].order_charged_yuan' "$RW")" "$E9"
+EXP_TR=$(awk -v a="$E9" 'BEGIN{printf "%.2f", 20-a}')
+check "不足挂培训=$EXP_TR 元" "$(jqget '.env_risks[0].training_charged_yuan' "$RW")" "$EXP_TR"
+check "扣款去向=ORDER,TRAINING" "$(jqget '.env_risks[0].charged_to' "$RW")" "ORDER,TRAINING"
+TID=$(jqget '.env_risks[0].training_id' "$RW")
+[ "$TID" != "null" ] && [ -n "$TID" ] && ok "培训记录已生成 id=$TID" || bad "培训记录缺失"
+TRN=$(curl -s "$BASE/collector/training" -H "$C1" | jq -r "[.training[] | select(.id==$TID)] | length")
+check "回收员可见培训记录" "$TRN" "1"
+TCST=$(curl -s -X POST "$BASE/collector/training/$TID/complete" -H "$C1" | jq -r '.training.status')
+check "培训完成状态" "$TCST" "COMPLETED"
+# trace 体现培训记录
+TT=$(curl -s "$BASE/orders/$OID9/trace" -H "$ST" | jq -r '.training_records | length')
+check "trace 含培训扣款记录" "$TT" "1"
 
 echo
 echo "==================================="

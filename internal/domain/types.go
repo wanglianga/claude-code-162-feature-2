@@ -289,14 +289,87 @@ type Complaint struct {
 }
 
 type CollectorEarning struct {
-	ID            int64     `json:"id"`
-	CollectorID   int64     `json:"collector_id"`
-	OrderID       int64     `json:"order_id"`
-	BaseCents     int64     `json:"base_cents"`
-	WeightCents   int64     `json:"weight_cents"`
-	FloorCents    int64     `json:"floor_cents"`
-	DistanceCents int64     `json:"distance_cents"`
-	PenaltyCents  int64     `json:"penalty_cents"`
-	TotalCents    int64     `json:"total_cents"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID                   int64     `json:"id"`
+	CollectorID          int64     `json:"collector_id"`
+	OrderID              int64     `json:"order_id"`
+	BaseCents            int64     `json:"base_cents"`
+	WeightCents          int64     `json:"weight_cents"`
+	FloorCents           int64     `json:"floor_cents"`
+	DistanceCents        int64     `json:"distance_cents"`
+	PenaltyCents         int64     `json:"penalty_cents"`
+	MisacceptPenaltyCents int64    `json:"misaccept_penalty_cents"` // 误收不可回收物异常扣款
+	TotalCents           int64     `json:"total_cents"`
+	CreatedAt            time.Time `json:"created_at"`
 }
+
+// RejectionCatalogItem 拒收依据目录项(风险/依据/正确投放建议)
+type RejectionCatalogItem struct {
+	Code         string `json:"code"`
+	Name         string `json:"name"`
+	DisposalType string `json:"disposal_type"`
+	RiskLevel    string `json:"risk_level"`
+	RiskDesc     string `json:"risk_desc"`
+	Basis        string `json:"basis"`
+	Advice       string `json:"advice"`
+}
+
+// DisposalPoint 规范处理点(有害垃圾定点收集等)
+type DisposalPoint struct {
+	ID        int64   `json:"id"`
+	Name      string  `json:"name"`
+	Accepts   []string `json:"accepts"`
+	Street    string  `json:"street"`
+	Address   string  `json:"address"`
+	Lat       float64 `json:"lat"`
+	Lng       float64 `json:"lng"`
+	OpenHours string  `json:"open_hours"`
+	Phone     string  `json:"phone"`
+	DistanceKm float64 `json:"distance_km,omitempty"` // 查询时按距离排序填充
+}
+
+// ContaminationRecord 不可回收物混入记录
+type ContaminationRecord struct {
+	ID                   int64      `json:"id"`
+	OrderID              int64      `json:"order_id"`
+	ItemID               *int64     `json:"item_id,omitempty"`
+	ItemCategory         string     `json:"item_category"`
+	ItemName             string     `json:"item_name"`
+	ContaminantCode      string     `json:"contaminant_code"`
+	DetectedStage        string     `json:"detected_stage"`
+	Status               string     `json:"status"`
+	WeightG              int64      `json:"weight_g"`
+	RiskLevel            string     `json:"risk_level"`
+	RiskDesc             string     `json:"risk_desc"`
+	RejectionBasis       string     `json:"rejection_basis"`
+	DisposalAdvice       string     `json:"disposal_advice"`
+	ResidentInsists      bool       `json:"resident_insists"`
+	HandlingCostCents    int64      `json:"handling_cost_cents"`
+	OrderChargedCents    int64      `json:"order_charged_cents"`
+	TrainingChargedCents int64      `json:"training_charged_cents"`
+	ChargedTo            string     `json:"charged_to"`
+	TrainingID           *int64     `json:"training_id,omitempty"`
+	StationID            *int64     `json:"station_id,omitempty"`
+	DetectorID           int64      `json:"detector_id"`
+	DetectorRole         string     `json:"detector_role"`
+	ResolvedAt           *time.Time `json:"resolved_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+}
+
+// CollectorTrainingRecord 回收员培训记录(误收留痕/挂账扣款)
+type CollectorTrainingRecord struct {
+	ID           int64      `json:"id"`
+	CollectorID  int64      `json:"collector_id"`
+	OrderID      *int64     `json:"order_id,omitempty"`
+	Kind         string     `json:"kind"`
+	Title        string     `json:"title"`
+	Content      string     `json:"content"`
+	Status       string     `json:"status"`
+	CostCents    int64      `json:"cost_cents"`
+	ChargedCents int64      `json:"charged_cents"`
+	ChargeTarget string     `json:"charge_target"`
+	CreatedAt    time.Time  `json:"created_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+}
+
+// EnvRiskRecord 环保风险记录(入库误收视图, 复用混入记录)
+type EnvRiskRecord = ContaminationRecord

@@ -174,21 +174,26 @@ func ListCertificatesByResident(ctx context.Context, q Querier, residentID int64
 
 func CreateEarning(ctx context.Context, q Querier, e *domain.CollectorEarning) error {
 	return q.QueryRow(ctx,
-		`INSERT INTO collector_earnings (collector_id, order_id, base_cents, weight_cents, floor_cents, distance_cents, penalty_cents, total_cents)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-		 ON CONFLICT (order_id) DO UPDATE SET penalty_cents=EXCLUDED.penalty_cents, total_cents=EXCLUDED.total_cents
+		`INSERT INTO collector_earnings (collector_id, order_id, base_cents, weight_cents, floor_cents, distance_cents, penalty_cents, misaccept_penalty_cents, total_cents)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		 ON CONFLICT (order_id) DO UPDATE SET
+		   penalty_cents=EXCLUDED.penalty_cents,
+		   misaccept_penalty_cents=EXCLUDED.misaccept_penalty_cents,
+		   total_cents=EXCLUDED.total_cents
 		 RETURNING id, created_at`,
-		e.CollectorID, e.OrderID, e.BaseCents, e.WeightCents, e.FloorCents, e.DistanceCents, e.PenaltyCents, e.TotalCents).
+		e.CollectorID, e.OrderID, e.BaseCents, e.WeightCents, e.FloorCents, e.DistanceCents,
+		e.PenaltyCents, e.MisacceptPenaltyCents, e.TotalCents).
 		Scan(&e.ID, &e.CreatedAt)
 }
 
 func EarningByOrder(ctx context.Context, q Querier, orderID int64) (*domain.CollectorEarning, error) {
 	e := &domain.CollectorEarning{}
 	err := q.QueryRow(ctx,
-		`SELECT id, collector_id, order_id, base_cents, weight_cents, floor_cents, distance_cents, penalty_cents, total_cents, created_at
+		`SELECT id, collector_id, order_id, base_cents, weight_cents, floor_cents, distance_cents,
+		        penalty_cents, misaccept_penalty_cents, total_cents, created_at
 		 FROM collector_earnings WHERE order_id=$1`, orderID).
 		Scan(&e.ID, &e.CollectorID, &e.OrderID, &e.BaseCents, &e.WeightCents, &e.FloorCents,
-			&e.DistanceCents, &e.PenaltyCents, &e.TotalCents, &e.CreatedAt)
+			&e.DistanceCents, &e.PenaltyCents, &e.MisacceptPenaltyCents, &e.TotalCents, &e.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -197,7 +202,8 @@ func EarningByOrder(ctx context.Context, q Querier, orderID int64) (*domain.Coll
 
 func ListEarnings(ctx context.Context, q Querier, collectorID int64, limit int) ([]*domain.CollectorEarning, error) {
 	rows, err := q.Query(ctx,
-		`SELECT id, collector_id, order_id, base_cents, weight_cents, floor_cents, distance_cents, penalty_cents, total_cents, created_at
+		`SELECT id, collector_id, order_id, base_cents, weight_cents, floor_cents, distance_cents,
+		        penalty_cents, misaccept_penalty_cents, total_cents, created_at
 		 FROM collector_earnings WHERE collector_id=$1 ORDER BY id DESC LIMIT $2`, collectorID, limit)
 	if err != nil {
 		return nil, err
@@ -207,7 +213,8 @@ func ListEarnings(ctx context.Context, q Querier, collectorID int64, limit int) 
 	for rows.Next() {
 		e := &domain.CollectorEarning{}
 		if err := rows.Scan(&e.ID, &e.CollectorID, &e.OrderID, &e.BaseCents, &e.WeightCents,
-			&e.FloorCents, &e.DistanceCents, &e.PenaltyCents, &e.TotalCents, &e.CreatedAt); err != nil {
+			&e.FloorCents, &e.DistanceCents, &e.PenaltyCents, &e.MisacceptPenaltyCents,
+			&e.TotalCents, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

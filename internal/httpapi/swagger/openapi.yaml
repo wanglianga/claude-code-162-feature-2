@@ -1,0 +1,422 @@
+openapi: 3.0.3
+info:
+  title: 区域再生资源回收服务 API
+  version: "1.1.0"
+  description: >
+    居民预约 → 派单 → 上门核验称重 → 现场定价 → 现金/积分结算 → 站点复称入库 → 环保凭证。
+    1.1 新增不可回收物混入处理: 现场标记拒收(风险说明/拒收依据/投放建议/附近处理点)与
+    误收入库(环保风险记录/处理成本/订单收益扣款/培训记录挂账)。
+    所有接口使用 Bearer Token 鉴权(测试账号 token 即身份)。
+servers:
+  - url: http://127.0.0.1:8080
+    description: 本地
+security:
+  - bearerAuth: []
+tags:
+  - name: common
+  - name: resident
+  - name: collector
+  - name: contamination
+  - name: station
+  - name: street
+paths:
+  /healthz:
+    get:
+      tags: [common]
+      security: []
+      summary: 健康检查
+      responses:
+        "200": { description: OK }
+  /api/v1/me:
+    get:
+      tags: [common]
+      summary: 当前登录身份
+      responses:
+        "200": { description: OK }
+  /api/v1/prices:
+    get:
+      tags: [common]
+      summary: 当前市场行情(版本化)
+      responses:
+        "200": { description: OK }
+  /api/v1/notifications:
+    get:
+      tags: [common]
+      summary: 通知列表(含风险说明/拒收/误收扣款通知)
+      responses:
+        "200": { description: OK }
+  /api/v1/rejection-catalog:
+    get:
+      tags: [contamination]
+      summary: 不可回收物拒收目录(风险等级/拒收依据/投放建议)
+      responses:
+        "200": { description: OK }
+  /api/v1/rejection-guide:
+    get:
+      tags: [contamination]
+      summary: 按编码查询拒收依据与附近处理点
+      parameters:
+        - { name: code, in: query, schema: { type: string, example: paint_bucket } }
+        - { name: lat, in: query, schema: { type: number } }
+        - { name: lng, in: query, schema: { type: number } }
+      responses:
+        "200": { description: OK }
+  /api/v1/orders:
+    post:
+      tags: [resident]
+      summary: 居民预约下单(幂等)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrderReq" }
+      responses:
+        "201": { description: 已创建 }
+        "409": { description: 非法状态/重复键 }
+    get:
+      tags: [resident]
+      summary: 我的订单
+      responses:
+        "200": { description: OK }
+  /api/v1/orders/{id}:
+    get:
+      tags: [resident]
+      summary: 订单详情(相关方可见)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+        "403": { description: 无权限 }
+  /api/v1/orders/{id}/trace:
+    get:
+      tags: [resident]
+      summary: 全链路追踪(含混入记录与培训扣款)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/orders/{id}/cancel:
+    post:
+      tags: [resident]
+      summary: 居民取消预约
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/orders/{id}/confirm:
+    post:
+      tags: [resident]
+      summary: 居民本人确认称重价格
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/orders/{id}/disputes:
+    post:
+      tags: [resident]
+      summary: 提出称重/价格争议(订单冻结)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "201": { description: 已受理 }
+  /api/v1/orders/{id}/complaints:
+    post:
+      tags: [resident]
+      summary: 投诉
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "201": { description: 已受理 }
+  /api/v1/points/balance:
+    get:
+      tags: [resident]
+      summary: 积分余额与流水
+      responses:
+        "200": { description: OK }
+  /api/v1/points/claims:
+    post:
+      tags: [resident]
+      summary: 积分不到账申诉(同步对账补账)
+      responses:
+        "200": { description: OK }
+    get:
+      tags: [resident]
+      summary: 我的申诉记录
+      responses:
+        "200": { description: OK }
+  /api/v1/certificates:
+    get:
+      tags: [resident]
+      summary: 我的环保凭证
+      responses:
+        "200": { description: OK }
+  /api/v1/contamination/{cid}/insist:
+    post:
+      tags: [contamination]
+      summary: 居民坚持要求带走 → 服务返回拒收依据(决定 REJECTED_PER_REGULATION)
+      parameters:
+        - { name: cid, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: 拒收依据 }
+        "409": { description: 记录已闭环 }
+  /api/v1/contamination/{cid}/guidance:
+    get:
+      tags: [contamination]
+      summary: 拒收后正确投放建议 + 附近处理点
+      parameters:
+        - { name: cid, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/duty:
+    post:
+      tags: [collector]
+      summary: 上/下岗与定位
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders:
+    get:
+      tags: [collector]
+      summary: 在途订单
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders/{id}/accept:
+    post:
+      tags: [collector]
+      summary: 接单
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders/{id}/start:
+    post: { tags: [collector], summary: 出发, responses: { "200": { description: OK } } }
+  /api/v1/collector/orders/{id}/arrive:
+    post: { tags: [collector], summary: 到达(记迟到), responses: { "200": { description: OK } } }
+  /api/v1/collector/orders/{id}/verify-resident:
+    post:
+      tags: [collector]
+      summary: 核验居民(SCAN_CODE 或 ASSISTED 限老人)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders/{id}/items:
+    post:
+      tags: [collector]
+      summary: 临时加品类
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "201": { description: OK }
+  /api/v1/collector/orders/{id}/weigh:
+    post:
+      tags: [collector]
+      summary: 现场称重定价(contamination_pm 扣杂)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders/{id}/confirm-assisted:
+    post:
+      tags: [collector]
+      summary: 协助老人确认
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders/{id}/settle:
+    post:
+      tags: [collector]
+      summary: 结算(cash/points)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders/{id}/settle/retry:
+    post:
+      tags: [collector]
+      summary: 现金支付失败重试
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders/{id}/deliver:
+    post:
+      tags: [collector]
+      summary: 送达站点
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/orders/{id}/contamination:
+    post:
+      tags: [contamination]
+      summary: 现场标记不可回收物并说明风险(如油漆桶混在金属中)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MarkContaminantReq" }
+      responses:
+        "201": { description: 已标记 MARKED }
+        "403": { description: 非该单回收员 }
+  /api/v1/collector/contamination/{cid}/reject:
+    post:
+      tags: [contamination]
+      summary: 回收员拒收闭环(MARKED→REJECTED), 通知居民投放方式
+      parameters:
+        - { name: cid, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: 已拒收 }
+        "409": { description: 非现场待处置记录/重复拒收 }
+  /api/v1/collector/earnings:
+    get:
+      tags: [collector]
+      summary: 收益明细(含超差扣罚 penalty_yuan 与误收扣款 misaccept_penalty_yuan)
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/training:
+    get:
+      tags: [collector]
+      summary: 培训/挂账记录(误收不可回收物纠偏)
+      responses:
+        "200": { description: OK }
+  /api/v1/collector/training/{tid}/complete:
+    post:
+      tags: [collector]
+      summary: 完成培训销项
+      parameters:
+        - { name: tid, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/station/inbound/{orderId}/reweigh:
+    post:
+      tags: [station]
+      summary: >
+        入库复称; contaminants 为误收的不可回收物(处理成本由入库人员标记),
+        生成环保风险记录, 成本优先从订单收益扣除、不足挂培训记录。
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReweighReq" }
+      responses:
+        "200": { description: 已入库, 返回 env_risks }
+  /api/v1/station/inbound:
+    get:
+      tags: [station]
+      summary: 待入库列表
+      responses:
+        "200": { description: OK }
+  /api/v1/station/quality:
+    get:
+      tags: [station]
+      summary: 入库质量(复称差异统计)
+      responses:
+        "200": { description: OK }
+  /api/v1/station/env-risks:
+    get:
+      tags: [station]
+      summary: 环保风险台账(误收不可回收物及处理成本)
+      responses:
+        "200": { description: OK }
+  /api/v1/street/stats:
+    get:
+      tags: [street]
+      summary: 街道参与统计
+      responses:
+        "200": { description: OK }
+  /api/v1/street/flows:
+    get:
+      tags: [street]
+      summary: 资源流向
+      responses:
+        "200": { description: OK }
+  /api/v1/street/disputes:
+    get:
+      tags: [street]
+      summary: 争议列表
+      responses:
+        "200": { description: OK }
+  /api/v1/street/disputes/{id}/resolve:
+    post:
+      tags: [street]
+      summary: 争议裁决(adjust/confirm/reject)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/street/complaints:
+    get:
+      tags: [street]
+      summary: 投诉列表
+      responses:
+        "200": { description: OK }
+  /api/v1/street/complaints/{id}/resolve:
+    post:
+      tags: [street]
+      summary: 投诉处理
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: OK }
+  /api/v1/street/prices:
+    post:
+      tags: [street]
+      summary: 调整市场价(版本化, 不影响老订单快照)
+      responses:
+        "200": { description: OK }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    CreateOrderReq:
+      type: object
+      required: [items, time_window_start, time_window_end]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              category: { type: string, example: metal }
+              est_weight_kg: { type: number, example: 10 }
+        time_window_start: { type: string, format: date-time }
+        time_window_end: { type: string, format: date-time }
+        idempotency_key: { type: string }
+    MarkContaminantReq:
+      type: object
+      required: [item_name]
+      properties:
+        item_category: { type: string, example: metal, description: 混入的可回收品类 }
+        item_name: { type: string, example: 油漆桶 }
+        code: { type: string, example: paint_bucket, description: rejection_catalog 编码 }
+        weight_kg: { type: number, example: 0.6 }
+        risk_note: { type: string, example: 桶内有残漆, 气味刺鼻 }
+    ReweighReq:
+      type: object
+      properties:
+        weights:
+          type: array
+          items:
+            type: object
+            properties:
+              category: { type: string }
+              weight_kg: { type: number }
+        contaminants:
+          type: array
+          items:
+            type: object
+            required: [item_name]
+            properties:
+              item_category: { type: string, example: metal }
+              item_name: { type: string, example: 油漆桶 }
+              code: { type: string, example: paint_bucket }
+              weight_kg: { type: number, example: 0.8 }
+              handling_cost_yuan: { type: number, example: 2, description: 入库人员标记处理成本(元) }
+              risk_note: { type: string }

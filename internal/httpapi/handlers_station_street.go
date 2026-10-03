@@ -22,6 +22,14 @@ func (s *Server) handleReweigh(w http.ResponseWriter, r *http.Request) {
 			Category string  `json:"category"`
 			WeightKg float64 `json:"weight_kg"`
 		} `json:"weights"`
+		Contaminants []struct {
+			ItemCategory     string  `json:"item_category"`
+			ItemName         string  `json:"item_name"`
+			Code             string  `json:"code"`
+			WeightKg         float64 `json:"weight_kg"`
+			HandlingCostYuan float64 `json:"handling_cost_yuan"`
+			RiskNote         string  `json:"risk_note"`
+		} `json:"contaminants"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, err)
@@ -31,12 +39,23 @@ func (s *Server) handleReweigh(w http.ResponseWriter, r *http.Request) {
 	for _, wi := range req.Weights {
 		weights = append(weights, svc.ReweighItem{Category: wi.Category, WeightKg: wi.WeightKg})
 	}
-	o, items, err := s.svc.StationReweigh(r.Context(), u.ID, orderID, weights)
+	var contaminants []svc.InboundContaminant
+	for _, c := range req.Contaminants {
+		contaminants = append(contaminants, svc.InboundContaminant{
+			ItemCategory: c.ItemCategory, ItemName: c.ItemName, Code: c.Code,
+			WeightKg: c.WeightKg, HandlingCostYuan: c.HandlingCostYuan, RiskNote: c.RiskNote,
+		})
+	}
+	o, items, risks, err := s.svc.StationReweigh(r.Context(), u.ID, orderID, weights, contaminants)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"order": orderJSON(o), "items": itemsJSON(items)})
+	riskOut := make([]map[string]any, 0, len(risks))
+	for _, rec := range risks {
+		riskOut = append(riskOut, contamJSON(rec))
+	}
+	writeJSON(w, 200, map[string]any{"order": orderJSON(o), "items": itemsJSON(items), "env_risks": riskOut})
 }
 
 // handleStationInbound 站点待入库/已入库列表

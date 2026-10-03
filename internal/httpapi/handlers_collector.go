@@ -236,6 +236,7 @@ func (s *Server) handleEarnings(w http.ResponseWriter, r *http.Request) {
 			"order_id": e.OrderID, "base_yuan": domain.CentsToYuan(e.BaseCents),
 			"weight_yuan": domain.CentsToYuan(e.WeightCents), "floor_yuan": domain.CentsToYuan(e.FloorCents),
 			"distance_yuan": domain.CentsToYuan(e.DistanceCents), "penalty_yuan": domain.CentsToYuan(e.PenaltyCents),
+			"misaccept_penalty_yuan": domain.CentsToYuan(e.MisacceptPenaltyCents),
 			"total_yuan": domain.CentsToYuan(e.TotalCents), "created_at": e.CreatedAt,
 		})
 	}

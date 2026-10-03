@@ -172,6 +172,8 @@ type OrderTrace struct {
 	Earning       *domain.CollectorEarning `json:"earning,omitempty"`
 	Disputes      []*domain.Dispute        `json:"disputes"`
 	Complaints    []*domain.Complaint      `json:"complaints"`
+	Contaminations []*domain.ContaminationRecord `json:"contaminations"`
+	TrainingRecords []*domain.CollectorTrainingRecord `json:"training_records"`
 }
 
 func (s *Service) Trace(ctx context.Context, orderID int64) (*OrderTrace, error) {
@@ -232,6 +234,22 @@ func (s *Service) Trace(ctx context.Context, orderID int64) (*OrderTrace, error)
 	for _, c := range complaints {
 		if c.OrderID == orderID {
 			t.Complaints = append(t.Complaints, c)
+		}
+	}
+	// 不可回收物混入记录(现场拒收/入库误收)与培训扣款
+	if t.Contaminations, err = store.ListContaminationByOrder(ctx, q, orderID); err != nil {
+		return nil, err
+	}
+	t.TrainingRecords = []*domain.CollectorTrainingRecord{}
+	if o.CollectorID != nil {
+		trainings, err := store.ListTrainingRecords(ctx, q, *o.CollectorID, 200)
+		if err != nil {
+			return nil, err
+		}
+		for _, tr := range trainings {
+			if tr.OrderID != nil && *tr.OrderID == orderID {
+				t.TrainingRecords = append(t.TrainingRecords, tr)
+			}
 		}
 	}
 	return t, nil
