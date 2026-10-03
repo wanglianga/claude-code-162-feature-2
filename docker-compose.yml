@@ -1,0 +1,64 @@
+# 一键启动: docker compose up --build
+# 服务: PostgreSQL15 + Redis7 + Kafka3.9(KRaft) + recycle-app(自动迁移+种子+API/worker)
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: recycle
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d recycle"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: bitnami/kafka:3.9
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "controller,broker"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "9092:9092"
+
+  app:
+    build: .
+    command: ["/bin/sh", "-c", "/app/recycle-app seed && /app/recycle-app all"]
+    environment:
+      PG_DSN: "postgres://postgres@postgres:5432/recycle?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      KAFKA_BROKERS: "kafka:9092"
+      HTTP_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    restart: on-failure
+
+volumes:
+  pgdata:

@@ -289,14 +289,89 @@ type Complaint struct {
 }
 
 type CollectorEarning struct {
-	ID            int64     `json:"id"`
-	CollectorID   int64     `json:"collector_id"`
-	OrderID       int64     `json:"order_id"`
-	BaseCents     int64     `json:"base_cents"`
-	WeightCents   int64     `json:"weight_cents"`
-	FloorCents    int64     `json:"floor_cents"`
-	DistanceCents int64     `json:"distance_cents"`
-	PenaltyCents  int64     `json:"penalty_cents"`
-	TotalCents    int64     `json:"total_cents"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID                int64     `json:"id"`
+	CollectorID       int64     `json:"collector_id"`
+	OrderID           int64     `json:"order_id"`
+	BaseCents         int64     `json:"base_cents"`
+	WeightCents       int64     `json:"weight_cents"`
+	FloorCents        int64     `json:"floor_cents"`
+	DistanceCents     int64     `json:"distance_cents"`
+	PenaltyCents      int64     `json:"penalty_cents"`
+	HazmatDeductCents int64     `json:"hazmat_deduct_cents"` // 不可回收物误收异常扣款
+	TotalCents        int64     `json:"total_cents"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+// ---- 不可回收物(危险废物)混入处理 ----
+
+// HazmatDisposalPoint 附近危废/不可回收物处理点
+type HazmatDisposalPoint struct {
+	ID         int64     `json:"id"`
+	Name       string    `json:"name"`
+	Street     string    `json:"street"`
+	Address    string    `json:"address"`
+	Lat        float64   `json:"lat"`
+	Lng        float64   `json:"lng"`
+	Accepts    []string  `json:"accepts"`
+	OpenHours  string    `json:"open_hours"`
+	Phone      string    `json:"phone"`
+	DistanceKm float64   `json:"distance_km,omitempty"` // 查询时按距离排序填充
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// RejectedItem 现场拒收记录(回收员标记不可回收物)
+type RejectedItem struct {
+	ID               int64                  `json:"id"`
+	OrderID          int64                  `json:"order_id"`
+	CollectorID      int64                  `json:"collector_id"`
+	Category         string                 `json:"category"`
+	ItemName         string                 `json:"item_name"`
+	HazmatCode       string                 `json:"hazmat_code"`
+	RiskLevel        string                 `json:"risk_level"`
+	RiskNote         string                 `json:"risk_note"`
+	RefusalBasis     string                 `json:"refusal_basis"`
+	RefusalText      string                 `json:"refusal_text"`
+	DisposalAdvice   string                 `json:"disposal_advice"`
+	ResidentInsisted bool                   `json:"resident_insisted"`
+	Status           string                 `json:"status"`
+	NearestPointID   *int64                 `json:"nearest_point_id,omitempty"`
+	RefusalBases     []map[string]string    `json:"refusal_bases,omitempty"` // 居民坚持时返回的全部依据
+	NearestPoints    []*HazmatDisposalPoint `json:"nearest_points,omitempty"`
+	CreatedAt        time.Time              `json:"created_at"`
+}
+
+// StationHazmatRecord 站点入库发现误收的异常记录(处理成本+环保风险+异常扣款)
+type StationHazmatRecord struct {
+	ID                 int64     `json:"id"`
+	OrderID            int64     `json:"order_id"`
+	StationID          int64     `json:"station_id"`
+	OperatorID         int64     `json:"operator_id"`
+	CollectorID        int64     `json:"collector_id"`
+	Category           string    `json:"category"`
+	ItemName           string    `json:"item_name"`
+	HazmatCode         string    `json:"hazmat_code"`
+	RiskLevel          string    `json:"risk_level"`
+	RiskNote           string    `json:"risk_note"`
+	WeightG            int64     `json:"weight_g"`
+	HandlingCostCents  int64     `json:"handling_cost_cents"`
+	DeductTarget       string    `json:"deduct_target"`
+	EarningDeductCents int64     `json:"earning_deduct_cents"`
+	TrainingID         *int64    `json:"training_id,omitempty"`
+	InboundID          *int64    `json:"inbound_id,omitempty"`
+	Status             string    `json:"status"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+// CollectorTrainingRecord 回收员培训/再教育记录(误收扣款体现)
+type CollectorTrainingRecord struct {
+	ID             int64      `json:"id"`
+	CollectorID    int64      `json:"collector_id"`
+	OrderID        *int64     `json:"order_id,omitempty"`
+	HazmatRecordID *int64     `json:"hazmat_record_id,omitempty"`
+	Kind           string     `json:"kind"`
+	Reason         string     `json:"reason"`
+	DeductCents    int64      `json:"deduct_cents"`
+	Status         string     `json:"status"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 }

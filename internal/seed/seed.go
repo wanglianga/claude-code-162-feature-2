@@ -138,6 +138,40 @@ func Run(ctx context.Context, st *store.Store, rdb *redis.Client) error {
 				}
 			}
 		}
+		// 不可回收物(有害垃圾/危废)处理点
+		points := []struct {
+			name, street, addr, accepts, hours, phone string
+			lat, lng                                  float64
+		}{
+			{"城东街道有害垃圾归集中心", "城东街道", "城东路 88 号环保大院",
+				`["paint_bucket","used_oil_drum","lead_battery","fluorescent_lamp","pesticide_container","expired_medicine"]`,
+				"周一至周日 08:00-17:00", "021-58001100", 31.2335, 121.4820},
+			{"幸福里小区有害垃圾收集点", "城东街道", "幸福里小区南门物业旁",
+				`["paint_bucket","fluorescent_lamp","expired_medicine"]`,
+				"全天投放, 每周四清运", "021-58002200", 31.2308, 121.4741},
+			{"绿源再生资源危废中转站", "城东街道", "工业园 3 号路 12 号",
+				`["paint_bucket","used_oil_drum","lead_battery","pesticide_container"]`,
+				"周一至周六 09:00-16:00", "021-58003300", 31.2360, 121.4860},
+			{"康泰药店过期药品回收箱", "城东街道", "幸福里商业街 12 号",
+				`["expired_medicine"]`,
+				"08:30-21:30", "021-58004400", 31.2312, 121.4750},
+		}
+		for _, p := range points {
+			var cnt int
+			if err := tx.QueryRow(ctx,
+				`SELECT count(*) FROM hazmat_disposal_points WHERE name=$1`, p.name).Scan(&cnt); err != nil {
+				return err
+			}
+			if cnt > 0 {
+				continue
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO hazmat_disposal_points (name, street, address, lat, lng, accepts, open_hours, phone)
+				 VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
+				p.name, p.street, p.addr, p.lat, p.lng, p.accepts, p.hours, p.phone); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"recycle/internal/apidoc"
 	"recycle/internal/domain"
 	"recycle/internal/store"
 	"recycle/internal/svc"
@@ -114,6 +115,11 @@ func (s *Server) Router() http.Handler {
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
+	// Swagger UI / OpenAPI 3.x 规范(免鉴权, 自托管静态资源)
+	r.Get("/docs", func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, "/docs/", http.StatusMovedPermanently)
+	})
+	r.Handle("/docs/*", http.StripPrefix("/docs", apidoc.Handler()))
 	r.Route("/api/v1", func(r chi.Router) {
 		r.With(s.auth).Get("/me", s.handleMe)
 		r.With(s.auth).Get("/prices", s.handlePrices)
@@ -132,6 +138,7 @@ func (s *Server) Router() http.Handler {
 		r.With(s.auth).Post("/points/claims", requireRole(domain.RoleResident, s.handlePointsClaim))
 		r.With(s.auth).Get("/points/claims", requireRole(domain.RoleResident, s.handlePointsClaims))
 		r.With(s.auth).Get("/certificates", requireRole(domain.RoleResident, s.handleMyCertificates))
+		r.With(s.auth).Get("/disposal-guidance", requireRole(domain.RoleResident, s.handleDisposalGuidance))
 
 		// 回收员
 		r.With(s.auth).Post("/collector/duty", requireRole(domain.RoleCollector, s.handleDuty))
@@ -142,16 +149,21 @@ func (s *Server) Router() http.Handler {
 		r.With(s.auth).Post("/collector/orders/{id}/verify-resident", requireRole(domain.RoleCollector, s.handleVerifyResident))
 		r.With(s.auth).Post("/collector/orders/{id}/items", requireRole(domain.RoleCollector, s.handleAddItem))
 		r.With(s.auth).Post("/collector/orders/{id}/weigh", requireRole(domain.RoleCollector, s.handleWeigh))
+		r.With(s.auth).Post("/collector/orders/{id}/reject-item", requireRole(domain.RoleCollector, s.handleRejectItem))
 		r.With(s.auth).Post("/collector/orders/{id}/confirm-assisted", requireRole(domain.RoleCollector, s.handleConfirmAssisted))
 		r.With(s.auth).Post("/collector/orders/{id}/settle", requireRole(domain.RoleCollector, s.handleSettle))
 		r.With(s.auth).Post("/collector/orders/{id}/settle/retry", requireRole(domain.RoleCollector, s.handleSettleRetry))
 		r.With(s.auth).Post("/collector/orders/{id}/deliver", requireRole(domain.RoleCollector, s.handleDeliver))
 		r.With(s.auth).Get("/collector/earnings", requireRole(domain.RoleCollector, s.handleEarnings))
+		r.With(s.auth).Get("/collector/hazmat-records", requireRole(domain.RoleCollector, s.handleCollectorHazmat))
+		r.With(s.auth).Get("/collector/training-records", requireRole(domain.RoleCollector, s.handleCollectorTraining))
 
 		// 站点
 		r.With(s.auth).Post("/station/inbound/{orderId}/reweigh", requireRole(domain.RoleStation, s.handleReweigh))
+		r.With(s.auth).Post("/station/inbound/{orderId}/hazmat", requireRole(domain.RoleStation, s.handleStationHazmat))
 		r.With(s.auth).Get("/station/inbound", requireRole(domain.RoleStation, s.handleStationInbound))
 		r.With(s.auth).Get("/station/quality", requireRole(domain.RoleStation, s.handleStationQuality))
+		r.With(s.auth).Get("/station/hazmat", requireRole(domain.RoleStation, s.handleStationHazmatList))
 
 		// 街道/管理
 		r.With(s.auth).Get("/street/stats", requireRole(domain.RoleStreet, s.handleStreetStats))
@@ -160,6 +172,7 @@ func (s *Server) Router() http.Handler {
 		r.With(s.auth).Post("/street/disputes/{id}/resolve", requireRole(domain.RoleStreet, s.handleResolveDispute))
 		r.With(s.auth).Get("/street/complaints", requireRole(domain.RoleStreet, s.handleListComplaints))
 		r.With(s.auth).Post("/street/complaints/{id}/resolve", requireRole(domain.RoleStreet, s.handleResolveComplaint))
+		r.With(s.auth).Get("/street/hazmat-risks", requireRole(domain.RoleStreet, s.handleStreetHazmatRisks))
 		r.With(s.auth).Post("/street/prices", requireRole(domain.RoleStreet, s.handleUpdatePrice))
 	})
 	return r

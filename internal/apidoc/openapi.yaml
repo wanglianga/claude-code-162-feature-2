@@ -1,0 +1,762 @@
+openapi: 3.0.3
+info:
+  title: 区域再生资源回收服务 API
+  description: >
+    面向居民、回收员、回收站、街道四方的再生资源回收平台。覆盖
+    居民预约 → 派单 → 上门核验称重 → 现场定价 → 现金/积分结算 → 站点复称 → 环保凭证
+    全链路，以及不可回收物（危险废物）混入的现场拒收与入库误收异常处理。
+
+
+    鉴权: 所有 /api/v1 接口使用 `Authorization: Bearer <token>`，Token 即身份(见种子账号)。
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:8080/api/v1
+    description: 本地开发
+  - url: http://127.0.0.1:18080/api/v1
+    description: e2e 验证
+tags:
+  - name: public
+  - name: resident
+  - name: collector
+  - name: station
+  - name: street
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      tags: [public]
+      security: []
+      summary: 健康检查
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: ok}
+  /me:
+    get:
+      tags: [public]
+      summary: 当前登录身份
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+  /prices:
+    get:
+      tags: [public]
+      summary: 当前生效市场价(版本化)
+      responses:
+        '200': {description: OK}
+  /notifications:
+    get:
+      tags: [public]
+      summary: 我的通知(含拒收/误收/迟到/积分到账通知)
+      responses:
+        '200': {description: OK}
+
+  /orders:
+    post:
+      tags: [resident]
+      summary: 居民提交回收预约(价格快照+预估价, 支持 Idempotency-Key 幂等)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderReq'
+      responses:
+        '201': {description: 创建成功}
+        '409': {description: 状态冲突/重复幂等键}
+    get:
+      tags: [resident]
+      summary: 我的预约列表
+      responses:
+        '200': {description: OK}
+  /orders/{id}:
+    get:
+      tags: [public]
+      summary: 订单详情(仅相关方可见)
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200': {description: OK}
+        '403': {description: 无权查看}
+  /orders/{id}/trace:
+    get:
+      tags: [public]
+      summary: >
+        全链路追踪: 状态事件流/确认记录/结算/积分流水/入库/环保凭证/收益/争议投诉/
+        拒收记录/误收环保风险记录/培训记录
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200': {description: OK}
+  /orders/{id}/cancel:
+    post:
+      tags: [resident]
+      summary: 居民取消预约(上门前)
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string}
+      responses:
+        '200': {description: OK}
+        '409': {description: 当前状态不可取消}
+  /orders/{id}/confirm:
+    post:
+      tags: [resident]
+      summary: 居民本人确认称重与价格(WEIGHED → CONFIRMED)
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200': {description: OK}
+  /orders/{id}/disputes:
+    post:
+      tags: [resident]
+      summary: 提出称重/品类/扣杂/价格争议(订单冻结 DISPUTED)
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [detail]
+              properties:
+                kind: {type: string, enum: [WEIGHT, CATEGORY, CONTAMINATION, PRICE]}
+                detail: {type: string}
+                item_id: {type: integer, format: int64}
+      responses:
+        '201': {description: 争议已受理}
+  /orders/{id}/complaints:
+    post:
+      tags: [public]
+      summary: 提交投诉(订单相关方)
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: {type: string}
+      responses:
+        '201': {description: 已受理}
+
+  /points/balance:
+    get:
+      tags: [resident]
+      summary: 积分余额与流水
+      responses:
+        '200': {description: OK}
+  /points/claims:
+    post:
+      tags: [resident]
+      summary: 积分不到账申诉(同步对账补账, 幂等)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_id]
+              properties:
+                order_id: {type: integer, format: int64}
+                note: {type: string}
+      responses:
+        '200':
+          description: RESOLVED_CREDITED 或 ALREADY_CREDITED
+    get:
+      tags: [resident]
+      summary: 我的申诉记录
+      responses:
+        '200': {description: OK}
+  /certificates:
+    get:
+      tags: [resident]
+      summary: 我的环保凭证
+      responses:
+        '200': {description: OK}
+  /disposal-guidance:
+    get:
+      tags: [resident]
+      summary: >
+        不可回收物正确投放建议 + 拒收依据 + 附近处理点(按距离排序)。
+        可带 order_id 以订单地址定位, 否则用居民档案地址。
+      parameters:
+        - name: hazmat_code
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [paint_bucket, used_oil_drum, lead_battery, fluorescent_lamp, pesticide_container, expired_medicine]
+          example: paint_bucket
+        - name: order_id
+          in: query
+          required: false
+          schema: {type: integer, format: int64}
+      responses:
+        '200':
+          description: 投放建议
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HazmatGuidance'
+
+  /collector/duty:
+    post:
+      tags: [collector]
+      summary: 回收员上下班(维护 GEO)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [on_duty, lat, lng]
+              properties:
+                on_duty: {type: boolean}
+                lat: {type: number, format: double}
+                lng: {type: number, format: double}
+      responses:
+        '200': {description: OK}
+  /collector/orders:
+    get:
+      tags: [collector]
+      summary: 回收员在途订单路线
+      responses:
+        '200': {description: OK}
+  /collector/orders/{id}/accept:
+    post:
+      tags: [collector]
+      summary: 接单 (ASSIGNED → ACCEPTED)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      responses:
+        '200': {description: OK}
+  /collector/orders/{id}/start:
+    post:
+      tags: [collector]
+      summary: 出发 (ACCEPTED → EN_ROUTE)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      responses:
+        '200': {description: OK}
+  /collector/orders/{id}/arrive:
+    post:
+      tags: [collector]
+      summary: 到达 (EN_ROUTE → ARRIVED, 记录迟到分钟)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      responses:
+        '200': {description: OK}
+  /collector/orders/{id}/verify-resident:
+    post:
+      tags: [collector]
+      summary: 核验居民(SCAN_CODE 核验码 / ASSISTED 仅老人且强制备注)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method]
+              properties:
+                method: {type: string, enum: [SCAN_CODE, ASSISTED]}
+                verify_code: {type: string}
+                assisted_note: {type: string}
+      responses:
+        '200': {description: OK}
+        '400': {description: 核验码错误/协助确认不满足条件}
+  /collector/orders/{id}/items:
+    post:
+      tags: [collector]
+      summary: 临时加品类(到达后称重前, 按当前市场价快照)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, est_weight_kg]
+              properties:
+                category: {type: string}
+                est_weight_kg: {type: number}
+      responses:
+        '201': {description: OK}
+  /collector/orders/{id}/weigh:
+    post:
+      tags: [collector]
+      summary: 现场称重定价(可重称; contamination_pm 千分比扣杂)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [weights]
+              properties:
+                weights:
+                  type: array
+                  items:
+                    type: object
+                    required: [category, weight_kg]
+                    properties:
+                      category: {type: string}
+                      weight_kg: {type: number}
+                      contamination_pm:
+                        type: integer
+                        description: 混入不可回收物扣杂千分比(0-999), 如 100=10%
+                photos:
+                  type: array
+                  items: {type: string}
+      responses:
+        '200': {description: OK}
+  /collector/orders/{id}/reject-item:
+    post:
+      tags: [collector]
+      summary: >
+        现场标记不可回收物并说明风险(如油漆桶混入金属)。居民坚持要求带走时
+        (resident_insisted=true) 返回拒收依据(法规条款)、正确投放建议与附近处理点。
+        订单状态不变, 该物品不计重, 同一物品不可重复标记。
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, hazmat_code]
+              properties:
+                category:
+                  type: string
+                  description: 被混入的可回收品类
+                  example: metal
+                hazmat_code:
+                  type: string
+                  enum: [paint_bucket, used_oil_drum, lead_battery, fluorescent_lamp, pesticide_container, expired_medicine]
+                  example: paint_bucket
+                item_name: {type: string}
+                risk_note: {type: string, description: 现场补充风险说明(可选)}
+                resident_insisted:
+                  type: boolean
+                  description: 居民是否坚持要求带走(影响 status 与拒收依据展示)
+      responses:
+        '201':
+          description: 拒收记录 + 投放指引
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rejected_item: {type: object}
+                  guidance: {$ref: '#/components/schemas/HazmatGuidance'}
+        '409': {description: 状态不允许/已标记过}
+  /collector/orders/{id}/confirm-assisted:
+    post:
+      tags: [collector]
+      summary: 协助老人确认称重(ASSISTED, 强制备注, 非老人被拒)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assisted_note]
+              properties:
+                assisted_note: {type: string}
+      responses:
+        '200': {description: OK}
+  /collector/orders/{id}/settle:
+    post:
+      tags: [collector]
+      summary: 结算(cash 同步 / points 经 Kafka 异步入账)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: {type: string, enum: [cash, points]}
+                simulate_fail:
+                  type: boolean
+                  description: 测试注入, 模拟现金支付失败
+      responses:
+        '200': {description: OK}
+  /collector/orders/{id}/settle/retry:
+    post:
+      tags: [collector]
+      summary: 现金支付失败后重试
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      responses:
+        '200': {description: OK}
+  /collector/orders/{id}/deliver:
+    post:
+      tags: [collector]
+      summary: 送达回收站 (SETTLED → DELIVERED)
+      parameters:
+        - $ref: '#/components/parameters/CollectorOrderId'
+      responses:
+        '200': {description: OK}
+  /collector/earnings:
+    get:
+      tags: [collector]
+      summary: >
+        我的收益(基础/重量/楼层/距离 − 复称扣罚 penalty_yuan −
+        不可回收物误收异常扣款 hazmat_deduct_yuan)
+      responses:
+        '200': {description: OK}
+  /collector/hazmat-records:
+    get:
+      tags: [collector]
+      summary: 我的误收环保风险记录(站点登记)
+      responses:
+        '200': {description: OK}
+  /collector/training-records:
+    get:
+      tags: [collector]
+      summary: 我的危废识别培训/再教育记录(误收扣款计入培训记录时在此体现)
+      responses:
+        '200': {description: OK}
+
+  /station/inbound:
+    get:
+      tags: [station]
+      summary: 待入库订单列表
+      responses:
+        '200': {description: OK}
+  /station/quality:
+    get:
+      tags: [station]
+      summary: 入库质量(复称差异分品类统计)
+      responses:
+        '200': {description: OK}
+  /station/hazmat:
+    get:
+      tags: [station]
+      summary: 本站环保风险(误收)台账
+      responses:
+        '200': {description: OK}
+  /station/inbound/{orderId}/reweigh:
+    post:
+      tags: [station]
+      summary: 站点复称入库(超差扣罚收益/积分差额调整, 开具环保凭证, 订单完结)
+      parameters:
+        - $ref: '#/components/parameters/StationOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [weights]
+              properties:
+                weights:
+                  type: array
+                  items:
+                    type: object
+                    required: [category, weight_kg]
+                    properties:
+                      category: {type: string}
+                      weight_kg: {type: number}
+      responses:
+        '200': {description: OK}
+  /station/inbound/{orderId}/hazmat:
+    post:
+      tags: [station]
+      summary: >
+        入库发现回收员误收不可回收物: 登记环保风险记录与处理成本, 异常扣款二选一:
+        ORDER=从该订单回收员收益扣减(以收益为上限, hazmat_deduct 单列);
+        TRAINING=生成待培训记录(扣款在培训记录体现)。同一订单幂等仅登记一次。
+      parameters:
+        - $ref: '#/components/parameters/StationOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hazmat_code, handling_cost_yuan, deduct_target]
+              properties:
+                hazmat_code:
+                  type: string
+                  enum: [paint_bucket, used_oil_drum, lead_battery, fluorescent_lamp, pesticide_container, expired_medicine]
+                  example: paint_bucket
+                category: {type: string, example: metal}
+                item_name: {type: string}
+                weight_kg: {type: number, example: 0.8}
+                handling_cost_yuan: {type: number, example: 2.5}
+                deduct_target: {type: string, enum: [ORDER, TRAINING]}
+                risk_note: {type: string}
+      responses:
+        '201':
+          description: 环保风险异常记录
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hazmat_record: {$ref: '#/components/schemas/StationHazmatRecord'}
+        '409': {description: 该订单已登记过异常}
+
+  /street/stats:
+    get:
+      tags: [street]
+      summary: 街道参与与分品类统计
+      parameters:
+        - $ref: '#/components/parameters/Street'
+      responses:
+        '200': {description: OK}
+  /street/flows:
+    get:
+      tags: [street]
+      summary: 资源流向(居民→回收员→站点)
+      parameters:
+        - $ref: '#/components/parameters/Street'
+      responses:
+        '200': {description: OK}
+  /street/disputes:
+    get:
+      tags: [street]
+      summary: 争议列表
+      parameters:
+        - name: status
+          in: query
+          schema: {type: string}
+      responses:
+        '200': {description: OK}
+  /street/disputes/{id}/resolve:
+    post:
+      tags: [street]
+      summary: 街道裁决争议(adjust/confirm/reject)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: {type: string, enum: [adjust, confirm, reject]}
+                note: {type: string}
+                adjusted_weights:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      category: {type: string}
+                      weight_kg: {type: number}
+                      contamination_pm: {type: integer}
+      responses:
+        '200': {description: OK}
+  /street/complaints:
+    get:
+      tags: [street]
+      summary: 投诉列表
+      parameters:
+        - name: status
+          in: query
+          schema: {type: string}
+      responses:
+        '200': {description: OK}
+  /street/complaints/{id}/resolve:
+    post:
+      tags: [street]
+      summary: 街道处理投诉
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolution]
+              properties:
+                resolution: {type: string}
+      responses:
+        '200': {description: OK}
+  /street/hazmat-risks:
+    get:
+      tags: [street]
+      summary: 辖区环保风险聚合(总数/高风险数/处理成本合计)
+      parameters:
+        - $ref: '#/components/parameters/Street'
+      responses:
+        '200': {description: OK}
+  /street/prices:
+    post:
+      tags: [street]
+      summary: 调整市场价(版本化, 不影响历史订单快照)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, price_yuan_per_kg]
+              properties:
+                category: {type: string}
+                price_yuan_per_kg: {type: number}
+      responses:
+        '200': {description: OK}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-token
+      description: 种子账号 Token, 如 token-resident1 / token-collector1 / token-station1 / token-street1
+  parameters:
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    CollectorOrderId:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    StationOrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    Street:
+      name: street
+      in: query
+      required: false
+      schema: {type: string}
+  schemas:
+    Me:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        account: {type: string}
+        name: {type: string}
+        role: {type: string, enum: [resident, collector, station, street]}
+    CreateOrderReq:
+      type: object
+      required: [items, time_window_start, time_window_end]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [category, est_weight_kg]
+            properties:
+              category: {type: string, example: metal}
+              est_weight_kg: {type: number, example: 5}
+        address: {type: string}
+        lat: {type: number, format: double}
+        lng: {type: number, format: double}
+        floor: {type: integer}
+        has_elevator: {type: boolean}
+        time_window_start: {type: string, format: date-time}
+        time_window_end: {type: string, format: date-time}
+        photos:
+          type: array
+          items: {type: string}
+        idempotency_key: {type: string}
+    HazmatGuidance:
+      type: object
+      properties:
+        hazmat_code: {type: string, example: paint_bucket}
+        item_name: {type: string, example: 油漆桶}
+        risk_level: {type: string, enum: [LOW, MEDIUM, HIGH]}
+        risk_note: {type: string}
+        refusal_bases:
+          type: array
+          description: 拒收依据(法规条款), 居民坚持带走时逐条出示
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+                enum: [NATIONAL_HW_LIST, NO_HAZMAT_LICENSE, BATCH_CONTAMINATION, LOCAL_SORTING_RULE]
+              text: {type: string}
+        disposal_advice: {type: string}
+        nearest_points:
+          type: array
+          items: {$ref: '#/components/schemas/HazmatDisposalPoint'}
+    HazmatDisposalPoint:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string, example: 幸福里小区有害垃圾收集点}
+        street: {type: string}
+        address: {type: string}
+        lat: {type: number, format: double}
+        lng: {type: number, format: double}
+        accepts:
+          type: array
+          items: {type: string}
+        open_hours: {type: string}
+        phone: {type: string}
+        distance_km: {type: number, description: 距查询点直线距离(升序)}
+    StationHazmatRecord:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        order_id: {type: integer, format: int64}
+        station_id: {type: integer, format: int64}
+        operator_id: {type: integer, format: int64}
+        collector_id: {type: integer, format: int64}
+        category: {type: string}
+        item_name: {type: string}
+        hazmat_code: {type: string}
+        risk_level: {type: string, enum: [LOW, MEDIUM, HIGH]}
+        risk_note: {type: string}
+        weight_kg: {type: number}
+        handling_cost_yuan: {type: number}
+        deduct_target: {type: string, enum: [ORDER, TRAINING]}
+        earning_deduct_yuan:
+          type: number
+          description: deduct_target=ORDER 时从该单收益实际扣减金额
+        training_id:
+          type: integer
+          format: int64
+          description: deduct_target=TRAINING 时生成的培训记录 ID
+        inbound_id: {type: integer, format: int64}
+        status: {type: string}
+        created_at: {type: string, format: date-time}

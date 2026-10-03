@@ -161,17 +161,20 @@ func (s *Service) UpdateMarketPrice(ctx context.Context, category string, priceC
 
 // OrderTrace 全链路追踪: 谁确认/何时确认/对后续结算的影响
 type OrderTrace struct {
-	Order         *domain.Order            `json:"order"`
-	Items         []*domain.OrderItem      `json:"items"`
-	Events        []*domain.OrderEvent     `json:"events"`
-	Confirmations []*domain.Confirmation   `json:"confirmations"`
-	Settlements   []*domain.Settlement     `json:"settlements"`
-	PointsEntries []*domain.PointsEntry    `json:"points_entries"`
-	Inbound       *domain.InboundRecord    `json:"inbound,omitempty"`
-	Certificates  []*domain.Certificate    `json:"certificates"`
-	Earning       *domain.CollectorEarning `json:"earning,omitempty"`
-	Disputes      []*domain.Dispute        `json:"disputes"`
-	Complaints    []*domain.Complaint      `json:"complaints"`
+	Order           *domain.Order                     `json:"order"`
+	Items           []*domain.OrderItem               `json:"items"`
+	Events          []*domain.OrderEvent              `json:"events"`
+	Confirmations   []*domain.Confirmation            `json:"confirmations"`
+	Settlements     []*domain.Settlement              `json:"settlements"`
+	PointsEntries   []*domain.PointsEntry             `json:"points_entries"`
+	Inbound         *domain.InboundRecord             `json:"inbound,omitempty"`
+	Certificates    []*domain.Certificate             `json:"certificates"`
+	Earning         *domain.CollectorEarning          `json:"earning,omitempty"`
+	Disputes        []*domain.Dispute                 `json:"disputes"`
+	Complaints      []*domain.Complaint               `json:"complaints"`
+	RejectedItems   []*domain.RejectedItem            `json:"rejected_items"`
+	HazmatRecords   []*domain.StationHazmatRecord     `json:"hazmat_records"`
+	TrainingRecords []*domain.CollectorTrainingRecord `json:"training_records"`
 }
 
 func (s *Service) Trace(ctx context.Context, orderID int64) (*OrderTrace, error) {
@@ -232,6 +235,25 @@ func (s *Service) Trace(ctx context.Context, orderID int64) (*OrderTrace, error)
 	for _, c := range complaints {
 		if c.OrderID == orderID {
 			t.Complaints = append(t.Complaints, c)
+		}
+	}
+	// 不可回收物: 现场拒收 + 入库误收异常 + 培训记录
+	if t.RejectedItems, err = store.ListRejectedItemsByOrder(ctx, q, orderID); err != nil {
+		return nil, err
+	}
+	if t.HazmatRecords, err = store.ListStationHazmatByOrder(ctx, q, orderID); err != nil {
+		return nil, err
+	}
+	t.TrainingRecords = []*domain.CollectorTrainingRecord{}
+	if o.CollectorID != nil {
+		trainings, err := store.ListTrainingRecords(ctx, q, *o.CollectorID, 200)
+		if err != nil {
+			return nil, err
+		}
+		for _, tr := range trainings {
+			if tr.OrderID != nil && *tr.OrderID == orderID {
+				t.TrainingRecords = append(t.TrainingRecords, tr)
+			}
 		}
 	}
 	return t, nil

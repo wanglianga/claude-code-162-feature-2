@@ -50,6 +50,16 @@ wait_balance(){
   curl -s "$BASE/points/balance" -H "$R1" | jq -r '.balance'
   return 1
 }
+# wait_notif <header> <kind>: 等待 Kafka 通知落库
+wait_notif(){
+  local hdr="$1" kind="$2" i n
+  for i in $(seq 1 15); do
+    n=$(curl -s "$BASE/notifications" -H "$hdr" | jq -r "[.notifications[]? | select(.kind==\"$kind\")] | length")
+    [ "$n" -ge 1 ] && { echo "$n"; return 0; }
+    sleep 1
+  done
+  echo "${n:-0}"; return 1
+}
 
 echo "=== 0. 重建环境 ==="
 psql "$PG_DSN" -q -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>/dev/null || { echo "pg reset failed"; exit 1; }
@@ -330,6 +340,134 @@ check "新价=1.5元" "$P" "1.5"
 # 老订单价格快照不受影响: 订单1的纸单价仍是1.2
 OLDP=$(curl -s "$BASE/orders/$OID" -H "$R1" | jq -r '.items[] | select(.category=="paper") | .est_price_yuan')
 check "老订单价格快照=1.2元" "$OLDP" "1.2"
+
+echo "=== 22. 不可回收物现场标记: 油漆桶混入金属, 居民坚持 -> 拒收依据+投放建议+处理点 ==="
+RESP=$(curl -s -X POST "$BASE/orders" -H "$R1" -H "$CT" -d "{
+  \"items\":[{\"category\":\"metal\",\"est_weight_kg\":5}],
+  \"time_window_start\":\"$WS\",\"time_window_end\":\"$WE\",\"idempotency_key\":\"e2e-order-7\"}")
+OID7=$(jqget '.order.id' "$RESP")
+VCODE7=$(jqget '.order.verify_code' "$RESP")
+wait_status "$OID7" "$C1" ASSIGNED >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/accept" -H "$C1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/start" -H "$C1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/arrive" -H "$C1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/verify-resident" -H "$C1" -H "$CT" \
+  -d "{\"method\":\"SCAN_CODE\",\"verify_code\":\"$VCODE7\"}" >/dev/null
+# 回收员现场标记: 油漆桶混在金属中, 居民坚持要求带走
+RJ=$(curl -s -X POST "$BASE/collector/orders/$OID7/reject-item" -H "$C1" -H "$CT" -d '{
+  "category":"metal","hazmat_code":"paint_bucket","resident_insisted":true}')
+check "拒收物品=油漆桶" "$(jqget '.rejected_item.item_name' "$RJ")" "油漆桶"
+check "环保风险=HIGH" "$(jqget '.rejected_item.risk_level' "$RJ")" "HIGH"
+check "居民坚持记录" "$(jqget '.rejected_item.resident_insisted' "$RJ")" "true"
+check "物品由居民带回" "$(jqget '.rejected_item.status' "$RJ")" "TAKEN_BACK"
+check "首要拒收依据=国家危废名录" "$(jqget '.rejected_item.refusal_basis' "$RJ")" "NATIONAL_HW_LIST"
+PB=$(echo "$RJ" | jq -r '[.guidance.refusal_bases[].code] | index("NO_HAZMAT_LICENSE") != null')
+check "拒收依据含无危废许可(固废法80条)" "$PB" "true"
+ADVICE=$(jqget '.guidance.disposal_advice' "$RJ")
+[ -n "$ADVICE" ] && [ "$ADVICE" != "null" ] && ok "正确投放建议已展示" || bad "投放建议缺失"
+PN=$(jqget '.guidance.nearest_points | length' "$RJ")
+[ "$PN" -ge 1 ] && ok "附近处理点 $PN 个(按距离排序)" || bad "附近处理点缺失"
+NEAREST=$(jqget '.guidance.nearest_points[0].name' "$RJ")
+check "最近处理点=幸福里收集点" "$NEAREST" "幸福里小区有害垃圾收集点"
+# 标记后订单状态不变, 流程可继续(油漆桶不计重)
+check "拒收后订单仍 RESIDENT_VERIFIED" "$(curl -s "$BASE/orders/$OID7" -H "$C1" | jq -r '.order.status')" "RESIDENT_VERIFIED"
+# 重复标记同一物品被拒
+ERR=$(curl -s -X POST "$BASE/collector/orders/$OID7/reject-item" -H "$C1" -H "$CT" \
+  -d '{"category":"metal","hazmat_code":"paint_bucket"}' | jq -r '.error // "none"')
+echo "$ERR" | grep -q "already marked" && ok "重复标记被拒" || bad "重复标记未拦截: $ERR"
+# 居民端投放建议查询
+G=$(curl -s "$BASE/disposal-guidance?hazmat_code=paint_bucket&order_id=$OID7" -H "$R1")
+check "居民端查询处理点数" "$(jqget '.nearest_points | length' "$G")" "$PN"
+# 居民收到拒收通知
+RN=$(wait_notif "$R1" HAZMAT_REJECTED)
+[ "$RN" -ge 1 ] && ok "居民收到拒收+投放通知" || bad "拒收通知缺失"
+
+echo "=== 23. 回收员误收: 站点入库异常扣款(从对应订单收益) ==="
+# 流程继续: 金属正常称重(5kg*3.5=17.5元) -> 现金结算 -> 送达
+curl -s -X POST "$BASE/collector/orders/$OID7/weigh" -H "$C1" -H "$CT" \
+  -d '{"weights":[{"category":"metal","weight_kg":5}]}' >/dev/null
+curl -s -X POST "$BASE/orders/$OID7/confirm" -H "$R1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/settle" -H "$C1" -H "$CT" -d '{"type":"cash"}' >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID7/deliver" -H "$C1" >/dev/null
+# 入库发现误收油漆桶 0.8kg, 处理成本 2.5 元, 从订单收益扣
+HZ=$(curl -s -X POST "$BASE/station/inbound/$OID7/hazmat" -H "$S1" -H "$CT" -d '{
+  "category":"metal","hazmat_code":"paint_bucket","weight_kg":0.8,
+  "handling_cost_yuan":2.5,"deduct_target":"ORDER"}')
+check "环保风险记录=HIGH" "$(jqget '.hazmat_record.risk_level' "$HZ")" "HIGH"
+check "扣款去向=ORDER" "$(jqget '.hazmat_record.deduct_target' "$HZ")" "ORDER"
+check "处理成本=2.5元" "$(jqget '.hazmat_record.handling_cost_yuan' "$HZ")" "2.5"
+check "订单收益实扣=2.5元" "$(jqget '.hazmat_record.earning_deduct_yuan' "$HZ")" "2.5"
+EARN=$(curl -s "$BASE/collector/earnings" -H "$C1")
+check "收益明细危废扣款=2.5元" "$(echo "$EARN" | jq -r ".earnings[] | select(.order_id==$OID7) | .hazmat_deduct_yuan")" "2.5"
+# total = base+weight+floor+distance-2.5
+TOTAL_OK=$(echo "$EARN" | jq -r "
+  (.earnings[] | select(.order_id==$OID7)) as \$e
+  | ((\$e.total_yuan - ((\$e.base_yuan+\$e.weight_yuan+\$e.floor_yuan+\$e.distance_yuan)-2.5)) | fabs < 0.001)")
+check "收益总额已扣减处理成本" "$TOTAL_OK" "true"
+# 同一订单重复登记异常被拒(防重复扣款)
+ERR=$(curl -s -X POST "$BASE/station/inbound/$OID7/hazmat" -H "$S1" -H "$CT" -d '{
+  "category":"metal","hazmat_code":"paint_bucket","weight_kg":0.8,
+  "handling_cost_yuan":2.5,"deduct_target":"ORDER"}' | jq -r '.error // "none"')
+echo "$ERR" | grep -q "already exists" && ok "重复异常登记被拒" || bad "重复登记未拦截: $ERR"
+# trace 含拒收与环保风险记录
+TR=$(curl -s "$BASE/orders/$OID7/trace" -H "$R1")
+check "trace含拒收记录" "$(echo "$TR" | jq -r '.rejected_items | length')" "1"
+check "trace含误收风险记录" "$(echo "$TR" | jq -r '.hazmat_records | length')" "1"
+# 复称入库照常完成
+RW=$(curl -s -X POST "$BASE/station/inbound/$OID7/reweigh" -H "$S1" -H "$CT" \
+  -d '{"weights":[{"category":"metal","weight_kg":5}]}')
+check "风险登记后复称完成" "$(jqget '.order.status' "$RW")" "COMPLETED"
+# 回收员收到误收通知
+CN=$(wait_notif "$C1" HAZMAT_MISACCEPTED)
+[ "$CN" -ge 1 ] && ok "回收员收到误收扣款通知" || bad "误收通知缺失"
+
+echo "=== 24. 回收员误收: 扣款计入培训记录 ==="
+RESP=$(curl -s -X POST "$BASE/orders" -H "$R1" -H "$CT" -d "{
+  \"items\":[{\"category\":\"metal\",\"est_weight_kg\":2}],
+  \"time_window_start\":\"$WS\",\"time_window_end\":\"$WE\",\"idempotency_key\":\"e2e-order-8\"}")
+OID8=$(jqget '.order.id' "$RESP")
+VCODE8=$(jqget '.order.verify_code' "$RESP")
+wait_status "$OID8" "$C1" ASSIGNED >/dev/null
+for act in accept start arrive; do
+  curl -s -X POST "$BASE/collector/orders/$OID8/$act" -H "$C1" >/dev/null
+done
+curl -s -X POST "$BASE/collector/orders/$OID8/verify-resident" -H "$C1" -H "$CT" \
+  -d "{\"method\":\"SCAN_CODE\",\"verify_code\":\"$VCODE8\"}" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID8/weigh" -H "$C1" -H "$CT" \
+  -d '{"weights":[{"category":"metal","weight_kg":2}]}' >/dev/null
+curl -s -X POST "$BASE/orders/$OID8/confirm" -H "$R1" >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID8/settle" -H "$C1" -H "$CT" -d '{"type":"cash"}' >/dev/null
+curl -s -X POST "$BASE/collector/orders/$OID8/deliver" -H "$C1" >/dev/null
+# 误收废日光灯管(混入金属), 处理成本 3 元, 计入培训记录
+HZ2=$(curl -s -X POST "$BASE/station/inbound/$OID8/hazmat" -H "$S1" -H "$CT" -d '{
+  "category":"metal","hazmat_code":"fluorescent_lamp","weight_kg":0.2,
+  "handling_cost_yuan":3,"deduct_target":"TRAINING"}')
+check "扣款去向=TRAINING" "$(jqget '.hazmat_record.deduct_target' "$HZ2")" "TRAINING"
+TID=$(jqget '.hazmat_record.training_id' "$HZ2")
+[ -n "$TID" ] && [ "$TID" != "null" ] && ok "培训记录已生成 id=$TID" || bad "培训记录缺失"
+TRG=$(curl -s "$BASE/collector/training-records" -H "$C1")
+check "培训记录扣款=3元" "$(echo "$TRG" | jq -r ".training_records[] | select(.id==$TID) | .deduct_yuan")" "3"
+check "培训记录状态=OPEN" "$(echo "$TRG" | jq -r ".training_records[] | select(.id==$TID) | .status")" "OPEN"
+check "培训记录关联订单" "$(echo "$TRG" | jq -r ".training_records[] | select(.id==$TID) | .order_id")" "$OID8"
+check "培训扣款合计=3元" "$(jqget '.total_deduct_yuan' "$TRG")" "3"
+# 培训扣款不动订单收益
+check "订单收益无危废扣款" "$(curl -s "$BASE/collector/earnings" -H "$C1" | jq -r ".earnings[] | select(.order_id==$OID8) | .hazmat_deduct_yuan")" "0"
+# trace 体现培训记录
+check "trace含培训记录" "$(curl -s "$BASE/orders/$OID8/trace" -H "$R1" | jq -r '.training_records | length')" "1"
+
+echo "=== 25. 站点/街道环保风险台账 ==="
+SL=$(curl -s "$BASE/station/hazmat" -H "$S1")
+[ "$(jqget '.hazmat_records | length' "$SL")" -ge 2 ] && ok "站点风险台账>=2条" || bad "站点台账不足"
+HL=$(curl -s "$BASE/collector/hazmat-records" -H "$C1")
+[ "$(jqget '.hazmat_records | length' "$HL")" -ge 2 ] && ok "回收员误收记录>=2条" || bad "回收员误收记录不足"
+SR=$(curl -s "$BASE/street/hazmat-risks?street=城东街道" -H "$ST")
+[ "$(jqget '.total' "$SR")" -ge 2 ] && ok "街道风险总数>=2" || bad "街道风险总数异常"
+[ "$(jqget '.high_risk' "$SR")" -ge 2 ] && ok "高风险记录>=2条" || bad "高风险计数异常"
+check "处理成本合计=5.5元" "$(jqget '.total_handling_cost_yuan' "$SR")" "5.5"
+# 未知危废编码被拒
+ERR=$(curl -s -X POST "$BASE/collector/orders/$OID8/reject-item" -H "$C1" -H "$CT" \
+  -d '{"category":"metal","hazmat_code":"nuclear_waste"}' | jq -r '.error // "none"')
+echo "$ERR" | grep -q "unknown hazmat" && ok "未知不可回收物编码被拒" || bad "未知编码未拦截: $ERR"
 
 echo
 echo "==================================="
